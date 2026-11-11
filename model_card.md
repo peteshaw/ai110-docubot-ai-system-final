@@ -202,3 +202,77 @@ behind the prompt.
   one, because it comes with a citation that looks like proof.
 - Check the refusal rate after any docs change: a sudden drop usually means new content is matching
   loosely, not that the bot got smarter.
+
+---
+
+## 8. AI Collaboration — one suggestion accepted, one rejected
+
+Both projects in this repo were built in collaboration with an AI assistant (Claude via OpenClaw).
+The interesting part is not that it helped; it is where its suggestions were taken and where they
+were overruled.
+
+### Accepted: a deterministic verifier instead of an LLM judge
+
+The assistant's first proposal for "verify the answer" was a second model call — a judge prompt
+asking Gemini whether the answer was supported by the snippets. I accepted the problem and rejected
+the mechanism, and the assistant proposed the alternative I kept: score the answer by the fraction of
+its content words that appear in the retrieved snippets (threshold 0.60), with stopwords removed and
+plurals folded.
+
+**Why it was accepted:** a second LLM call doubles cost and latency on every turn, and it makes the
+verifier non-deterministic — the same answer could pass on Monday and fail on Tuesday, which destroys
+the ability to test the loop at all. The term-overlap verifier runs offline, costs nothing, and made
+it possible to write 18 tests that need no API key. It is a weaker signal, and the trade-off is
+recorded in section 6 rather than hidden.
+
+### Revised: LLM-driven query expansion → static synonym table
+
+The companion suggestion was to fix the refused single-term query by asking the model to rewrite the
+query into a better search string. Same reasoning applied: the failure is lexical (one term cannot
+clear a two-term guardrail), so the fix can be lexical. The revision replaced the model call with a
+small synonym table — `authenticate → auth, token, login` — plus a filename fallback when no synonym
+applies.
+
+**Why it was revised:** it keeps the retry path deterministic and testable, it adds no latency, and
+it is inspectable — you can read the table and predict the behaviour. The cost is honest: a new
+domain needs new entries, and the table will not generalise to an arbitrary corpus. An LLM rewrite
+would generalise better; it would also make the harness non-reproducible.
+
+### What the collaboration actually looked like
+
+The assistant wrote first drafts; I set the constraints and caught the errors. Two examples worth
+recording because they are the kind of thing a reviewer should test for:
+
+1. **A logic error that passed review by looking plausible.** The first loop treated "the model
+   refused" as a *successfully verified* answer. That meant an empty retrieval — precisely the case
+   the project exists to fix — never triggered expansion, so the headline improvement silently did
+   not happen. It was caught by writing the assertion for the documented failure before believing the
+   demo output.
+2. **A tokenizer mismatch.** The retriever stems aggressively (`authenticate → authenticat`), so the
+   synonym lookup keyed on raw words quietly matched nothing. The test suite caught it; the demo
+   looked fine because the query in the demo happened to contain two usable terms.
+
+The general lesson: AI-generated code needs the *claim* tested, not the code read. Both bugs were in
+code that read correctly and produced plausible-looking output.
+
+---
+
+## 9. Reliability Testing — what surprised me
+
+The Module 4 model card treated the refused `"How do I authenticate?"` as one unlucky case. Scaling
+the test to 15 pass/fail cases showed it was a **class**:
+
+- **Ten of ten single-term queries I probed failed the same way** — `authenticate`, `login`, `auth`,
+  `token`, `database`, `users`, `endpoint`, `refresh`, `config`, `request`. The two-term guardrail is
+  a good idea that punishes short queries, which is how people actually type.
+- **The negative controls passed in both systems**, and that turned out to be the least interesting
+  result. They pass because the guardrail refuses *before* the model is called. The dangerous case is
+  the one no harness catches: a query that partially matches a document and produces a confident,
+  well-cited answer to a question the docs do not really address.
+- **Expansion fixes refusal, not ranking.** The documented "right document ranked second" failure is
+  untouched by this project. Reporting 15/15 without that caveat would be exactly the kind of
+  overclaiming this work is meant to correct.
+- **The verifier can be fooled by proximity.** Term overlap rewards answers that echo snippet
+  vocabulary, which is also what confident-sounding fabrication does when it borrows the document's
+  words. That is the main reason a second-judge design is listed as future work rather than rejected
+  outright.
