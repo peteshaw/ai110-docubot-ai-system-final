@@ -35,6 +35,10 @@ MIN_GROUNDING_RATIO = 0.60
 
 REFUSAL = "I do not know based on these docs."
 
+# Queries longer than this are truncated before retrieval. A pasted stack trace
+# is not a question, and unbounded input is how a demo falls over.
+MAX_QUERY_CHARS = 500
+
 # Words a verifier should ignore when measuring grounding.
 VERIFIER_STOPWORDS = {
     "the", "a", "an", "is", "are", "was", "were", "be", "been", "being", "to",
@@ -123,6 +127,26 @@ class TraceWriter:
         payload = {"ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), **event}
         with self.path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+
+
+def normalize_query(query: Any) -> tuple[str, str]:
+    """Return (cleaned_query, note). Never raises.
+
+    Handles the inputs a real user produces: None, empty string, whitespace,
+    newlines, 10 KB pasted text. `note` is empty for a normal query, otherwise
+    it records why the query was changed so the trace explains itself.
+    """
+    if query is None or not isinstance(query, str):
+        return "", "non_string_query"
+
+    cleaned = " ".join(query.split())
+    if not cleaned:
+        return "", "empty_query"
+
+    if len(cleaned) > MAX_QUERY_CHARS:
+        return cleaned[:MAX_QUERY_CHARS], "truncated"
+
+    return cleaned, ""
 
 
 def content_words(text: str) -> set[str]:
@@ -237,8 +261,23 @@ def run_agentic(
     loop still exercises retrieval, verification and refusal, so the path is
     demonstrable without an API key.
     """
-    result = AgentResult(query=query, answer="", status="refused")
-    current_query = query
+    result = AgentResult(query=query if isinstance(query, str) else "", answer="", status="refused")
+
+    cleaned, note = normalize_query(query)
+    if note in {"empty_query", "non_string_query"}:
+        result.answer = REFUSAL
+        result.status = "refused"
+        result.attempts.append(
+            Attempt(index=0, query="", answer=REFUSAL, grounded=False, reason=note)
+        )
+        if trace is not None:
+            trace.write({"event": "rejected", "reason": note, "query": result.query})
+        return result
+
+    if note == "truncated" and trace is not None:
+        trace.write({"event": "truncated", "original_chars": len(str(query)), "kept_chars": len(cleaned)})
+
+    current_query = cleaned
 
     for index in range(max_attempts):
         rows = bot.retrieve_with_scores(current_query, top_k=top_k)
@@ -253,9 +292,27 @@ def run_agentic(
         elif not snippets:
             answer = REFUSAL
         else:
-            answer = llm_client.answer_from_snippets(
-                current_query, [(row["filename"], row["text"]) for row in rows]
-            )
+            try:
+                answer = llm_client.answer_from_snippets(
+                    current_query, [(row["filename"], row["text"]) for row in rows]
+                )
+            except Exception as exc:  # API failure must degrade, not crash
+                answer = REFUSAL
+                result.attempts.append(
+                    Attempt(
+                        index=index,
+                        query=current_query,
+                        retrieved=filenames,
+                        answer=answer,
+                        grounded=False,
+                        reason=f"llm_error:{type(exc).__name__}",
+                    )
+                )
+                if trace is not None:
+                    trace.write({"event": "llm_error", "error": str(exc)[:200], "query": current_query})
+                result.answer = REFUSAL
+                result.status = "refused"
+                return result
 
         grounded, ratio, reason = verify_answer(answer, snippets)
         if not snippets:
