@@ -140,5 +140,46 @@ class TestAgenticLoop(unittest.TestCase):
             self.assertIn('"event": "result"', lines[-1])
 
 
+class FakeBrokenLLM:
+    """Simulates an API failure mid-run."""
+
+    def answer_from_snippets(self, query, snippets):
+        raise TimeoutError("upstream timed out")
+
+
+class TestInputHandling(unittest.TestCase):
+    """Bad input must degrade to a refusal, never a traceback."""
+
+    def setUp(self):
+        self.bot = DocuBot(docs_folder=str(DOCS))
+
+    def test_empty_query_is_rejected_without_crashing(self):
+        result = run_agentic(self.bot, None, "")
+        self.assertEqual(result.status, "refused")
+        self.assertEqual(result.attempts[0].reason, "empty_query")
+
+    def test_whitespace_only_query(self):
+        result = run_agentic(self.bot, None, "   \n\t  ")
+        self.assertEqual(result.status, "refused")
+        self.assertEqual(result.attempts[0].reason, "empty_query")
+
+    def test_none_query(self):
+        result = run_agentic(self.bot, None, None)
+        self.assertEqual(result.status, "refused")
+        self.assertEqual(result.attempts[0].reason, "non_string_query")
+
+    def test_overlong_query_is_truncated(self):
+        long_query = "auth token " * 100
+        result = run_agentic(self.bot, None, long_query)
+        self.assertLessEqual(len(result.attempts[0].query), 500)
+        self.assertNotEqual(result.status, "refused")
+
+    def test_llm_failure_degrades_to_refusal(self):
+        result = run_agentic(self.bot, FakeBrokenLLM(), "Where is the auth token generated?")
+        self.assertEqual(result.status, "refused")
+        self.assertTrue(is_refusal(result.answer))
+        self.assertIn("llm_error", result.attempts[-1].reason)
+
+
 if __name__ == "__main__":
     unittest.main()
