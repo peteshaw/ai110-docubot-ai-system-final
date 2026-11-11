@@ -18,6 +18,7 @@ load_dotenv(os.path.expanduser("~/.config/docubot/env"))
 from docubot import DocuBot
 from llm_client import GeminiClient
 from dataset import SAMPLE_QUERIES
+from agent import TraceWriter, run_agentic
 
 
 def try_create_llm_client():
@@ -50,6 +51,7 @@ def choose_mode(has_llm):
         print("  3) RAG (retrieval + LLM)")
     else:
         print("  3) RAG (unavailable, no GEMINI_API_KEY)")
+    print("  4) Agentic RAG (retrieve → answer → verify → retry)")
     print("  q) Quit")
 
     choice = input("Enter choice: ").strip().lower()
@@ -134,6 +136,34 @@ def run_rag_mode(bot, has_llm):
         print()
 
 
+def run_agentic_mode(bot, has_llm):
+    """
+    Mode 4:
+    Agentic RAG. Retrieves, answers, verifies the answer against the snippets,
+    and retries with an expanded query when the answer is not grounded.
+    Writes a JSONL trace to assets/agentic_trace.jsonl for the evidence trail.
+    """
+    queries, label = get_query_or_use_samples()
+    print(f"\nRunning agentic RAG mode on {label}...\n")
+
+    trace = TraceWriter("assets/agentic_trace.jsonl")
+    note = "" if has_llm else " (retrieval only — no GEMINI_API_KEY, so no generated answer)"
+
+    for query in queries:
+        print("=" * 60)
+        print(f"Question: {query}")
+        result = run_agentic(bot, bot.llm_client, query, trace=trace)
+        print(f"Status: {result.status} | attempts: {len(result.attempts)}"
+              f"{' (retried)' if result.retried else ''}{note}")
+        for attempt in result.attempts:
+            print(f"  attempt {attempt.index}: query={attempt.query!r} "
+                  f"retrieved={attempt.retrieved} grounded={attempt.grounded} "
+                  f"ratio={attempt.grounding_ratio:.2f} reason={attempt.reason}")
+        print("\nAnswer:")
+        print(result.answer)
+        print()
+
+
 def main():
     print("DocuBot Tinker Activity")
     print("=======================\n")
@@ -153,8 +183,10 @@ def main():
             run_retrieval_only_mode(bot)
         elif choice == "3":
             run_rag_mode(bot, has_llm)
+        elif choice == "4":
+            run_agentic_mode(bot, has_llm)
         else:
-            print("\nUnknown choice. Please pick 1, 2, 3, or q.\n")
+            print("\nUnknown choice. Please pick 1, 2, 3, 4, or q.\n")
 
 
 if __name__ == "__main__":
