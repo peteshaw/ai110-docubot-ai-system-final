@@ -1,0 +1,30 @@
+---
+flowchart TD
+    Q([User question]) --> G{Retrieval guardrail<br/>coverage ≥ 0.35<br/>AND ≥ 2 matched terms}
+
+    G -- "fails both" --> R1[Refuse before any LLM call<br/>fixed refusal string]
+    G -- passes --> RET[Retriever<br/>700-char chunks, heading-path prefixes<br/>inverted index + tf-idf]
+    RET --> SNIP[Top-k snippets]
+    SNIP --> ANS[Answerer<br/>Gemini RAG prompt<br/>snippets only]
+    ANS --> VER{Verifier<br/>is every claim grounded<br/>in the snippets?}
+
+    VER -- "grounded" --> OK([Answer returned])
+    VER -- "ungrounded / empty" --> EXP[Query expansion<br/>add missing domain terms]
+    EXP --> RETRY{Attempts left?}
+    RETRY -- yes --> RET
+    RETRY -- no --> R2[Fall back to refusal<br/>or answer with caveat]
+
+    R1 --> TRACE[(JSONL interaction trace)]
+    OK --> TRACE
+    R2 --> TRACE
+
+    EVAL[[Evaluation harness<br/>pass/fail per query<br/>baseline vs new]] -.->|drives| Q
+    EVAL -.->|reads| TRACE
+    HUMAN([Human check<br/>review traces + model card]) -.->|audits| TRACE
+
+    classDef guard fill:#fff4e6,stroke:#d9822b,stroke-width:2px
+    classDef core fill:#e8f0fe,stroke:#4285f4,stroke-width:2px
+    classDef output fill:#e6f4ea,stroke:#34a853,stroke-width:2px
+    class G,VER,RETRY guard
+    class RET,ANS,EXP core
+    class OK,R1,R2 output
